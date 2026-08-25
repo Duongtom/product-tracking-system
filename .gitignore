@@ -1,0 +1,15 @@
+# Môi trường ảo — 16MB, máy ai người nấy tự tạo
+venv/
+
+# Bí mật — TUYỆT ĐỐI không đưa lên GitHub
+.env
+
+# Trí nhớ lúc chạy — thay đổi mỗi lần chạy, không phải mã nguồn
+state.json
+
+# File tạm Python sinh ra
+__pycache__/
+*.pyc
+
+# Rác của macOS
+.DS_Store
