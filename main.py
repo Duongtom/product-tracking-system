@@ -39,16 +39,24 @@ for product in data["products"]:
         }
 
 previous = load_previous()
+events = []
 
 if not previous:
     print("First run - remembering", len(current), "products. No alerts.")
 else:
-    new_count = 0
     for product_id in current:
+        current_item = current[product_id]
+
         if product_id not in previous:
-            print("NEW:", current[product_id]["title"])
-            new_count = new_count + 1
-    print("Done.", new_count, "new products.")
+            events.append("NEW: " + current_item["title"])
+        else:
+            previous_item = previous[product_id]
+            if not previous_item["available"] and current_item["available"]:
+                events.append("BACK IN STOCK: " + current_item["title"])
+
+    for event in events:
+        print(event)
+    print("Done.", len(events), "events.")
 
 with open("state.json", "w") as f:
     json.dump(current, f, indent=2, ensure_ascii=False)
