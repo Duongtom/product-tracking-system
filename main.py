@@ -2,6 +2,12 @@ import json
 import os
 import requests
 import unicodedata
+from dotenv import load_dotenv
+
+load_dotenv()
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
 def strip_accents(text):
@@ -18,6 +24,19 @@ def load_previous():
         with open("state.json") as f:
             return json.load(f)
     return {}
+
+
+def send_telegram(text):
+    api_url = "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage"
+    api_response = requests.post(
+        api_url,
+        data={"chat_id": TELEGRAM_CHAT_ID, "text": text},
+        timeout=15,
+    )
+    if api_response.status_code != 200:
+        print("Telegram failed:", api_response.status_code)
+        return False
+    return True
 
 
 url = "https://trainertown.com.au/products.json?limit=250"
@@ -40,6 +59,7 @@ for product in data["products"]:
 
 previous = load_previous()
 events = []
+sent_ok = True
 
 if not previous:
     print("First run - remembering", len(current), "products. No alerts.")
@@ -58,5 +78,11 @@ else:
         print(event)
     print("Done.", len(events), "events.")
 
-with open("state.json", "w") as f:
-    json.dump(current, f, indent=2, ensure_ascii=False)
+    if events:
+        sent_ok = send_telegram("\n".join(events))
+
+if sent_ok:
+    with open("state.json", "w") as f:
+        json.dump(current, f, indent=2, ensure_ascii=False)
+else:
+    print("Telegram failed - state not saved, will retry next run")
