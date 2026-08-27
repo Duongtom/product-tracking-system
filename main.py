@@ -8,6 +8,7 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+MIN_RATIO = 0.5
 
 
 def strip_accents(text):
@@ -24,6 +25,14 @@ def load_previous():
         with open("state.json") as f:
             return json.load(f)
     return {}
+
+
+def looks_broken(current, previous):
+    if not previous:
+        return False
+    if not current:
+        return True
+    return len(current) < len(previous) * MIN_RATIO
 
 
 def send_telegram(text):
@@ -59,9 +68,14 @@ for product in data["products"]:
 
 previous = load_previous()
 events = []
-sent_ok = True
+should_save = True
 
-if not previous:
+if looks_broken(current, previous):
+    warning = f"HEALTH: got {len(current)} products, expected around {len(previous)}. State not saved."
+    print(warning)
+    send_telegram(warning)
+    should_save = False
+elif not previous:
     print("First run - remembering", len(current), "products. No alerts.")
 else:
     for product_id in current:
@@ -79,10 +93,10 @@ else:
     print("Done.", len(events), "events.")
 
     if events:
-        sent_ok = send_telegram("\n".join(events))
+        should_save = send_telegram("\n".join(events))
 
-if sent_ok:
+if should_save:
     with open("state.json", "w") as f:
         json.dump(current, f, indent=2, ensure_ascii=False)
 else:
-    print("Telegram failed - state not saved, will retry next run")
+    print("State not saved - will retry next run")
