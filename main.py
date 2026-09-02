@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import requests
 import unicodedata
 from dotenv import load_dotenv
@@ -8,7 +9,39 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
 MIN_RATIO = 0.5
+MAX_PAGES = 20
+REQUEST_DELAY_SECONDS = 2
+EVENTS_PER_MESSAGE = 10
+USER_AGENT = "TCGWatch/0.1 (+https://github.com/Duongtom/product-tracking-system) personal stock notifier"
+
+SOURCES = [
+    {
+        "id": "trainertown",
+        "name": "Trainer Town",
+        "base_url": "https://trainertown.com.au",
+        "collections": [],
+    },
+    {
+        "id": "pokebox",
+        "name": "Pokebox AU",
+        "base_url": "https://www.pokebox.com.au",
+        "collections": [
+            "english-sealed-pokemon-trading-cards",
+            "japanese-pokemon-tcg-booster-boxes",
+        ],
+    },
+    {
+        "id": "onlinecoins",
+        "name": "Online Coins",
+        "base_url": "https://www.onlinecoinsandcollectables.com.au",
+        "collections": ["pokemon-tcg"],
+    },
+]
+
+KEYWORDS = ["pokemon", "one piece", "op-17"]
+EXCLUDE_KEYWORDS = ["single", "sleeve", "playmat", "gaming mat", "binder", "deck box"]
 
 
 def strip_accents(text):
@@ -18,6 +51,48 @@ def strip_accents(text):
         if not unicodedata.combining(char):
             result = result + char
     return result
+
+
+def matches_keywords(title):
+    clean = strip_accents(title).lower()
+    for keyword in EXCLUDE_KEYWORDS:
+        if keyword in clean:
+            return False
+    for keyword in KEYWORDS:
+        if keyword in clean:
+            return True
+    return False
+
+
+def build_endpoints(source):
+    if not source["collections"]:
+        return [f"{source['base_url']}/products.json"]
+    endpoints = []
+    for handle in source["collections"]:
+        endpoints.append(f"{source['base_url']}/collections/{handle}/products.json")
+    return endpoints
+
+
+def fetch_products(source):
+    products = []
+    for endpoint in build_endpoints(source):
+        truncated = True
+        for page in range(1, MAX_PAGES + 1):
+            response = requests.get(
+                f"{endpoint}?limit=250&page={page}",
+                headers={"User-Agent": USER_AGENT},
+                timeout=20,
+            )
+            response.raise_for_status()
+            batch = response.json()["products"]
+            time.sleep(REQUEST_DELAY_SECONDS)
+            if not batch:
+                truncated = False
+                break
+            products.extend(batch)
+        if truncated:
+            print(f"WARNING: hit page limit on {endpoint}")
+    return products
 
 
 def load_previous():
@@ -48,52 +123,78 @@ def send_telegram(text):
     return True
 
 
-url = "https://trainertown.com.au/products.json?limit=250"
-response = requests.get(url)
-data = response.json()
+def send_events(events):
+    all_sent = True
+    for start in range(0, len(events), EVENTS_PER_MESSAGE):
+        chunk = events[start:start + EVENTS_PER_MESSAGE]
+        if not send_telegram("\n\n".join(chunk)):
+            all_sent = False
+    return all_sent
+
+
+def describe(kind, item):
+    return f"{kind} [{item['source']}]\n{item['title']}\n${item['price']}\n{item['url']}"
+
 
 current = {}
+failed_sources = []
 
-for product in data["products"]:
-    title = product["title"]
-    variant = product["variants"][0]
+for source in SOURCES:
+    try:
+        products = fetch_products(source)
+    except Exception as error:
+        print(f"FAILED {source['name']}: {error}")
+        failed_sources.append(source["name"])
+        continue
 
-    if "pokemon" in strip_accents(title).lower():
-        product_id = str(product["id"])
-        current[product_id] = {
-            "title": title,
+    kept = 0
+    for product in products:
+        if not matches_keywords(product["title"]):
+            continue
+        variant = product["variants"][0]
+        key = f"{source['id']}:{product['id']}"
+        current[key] = {
+            "source": source["name"],
+            "title": product["title"],
             "price": variant["price"],
             "available": variant["available"],
+            "url": f"{source['base_url']}/products/{product['handle']}",
         }
+        kept += 1
+    print(f"{source['name']}: fetched {len(products)}, matched {kept}")
 
 previous = load_previous()
 events = []
 should_save = True
 
-if looks_broken(current, previous):
+if failed_sources:
+    warning = f"HEALTH: sources failed: {', '.join(failed_sources)}. State not saved."
+    print(warning)
+    send_telegram(warning)
+    should_save = False
+elif looks_broken(current, previous):
     warning = f"HEALTH: got {len(current)} products, expected around {len(previous)}. State not saved."
     print(warning)
     send_telegram(warning)
     should_save = False
 elif not previous:
-    print("First run - remembering", len(current), "products. No alerts.")
+    print(f"First run - remembering {len(current)} products. No alerts.")
 else:
-    for product_id in current:
-        current_item = current[product_id]
-
-        if product_id not in previous:
-            events.append("NEW: " + current_item["title"])
+    for key in current:
+        current_item = current[key]
+        if key not in previous:
+            events.append(describe("NEW", current_item))
         else:
-            previous_item = previous[product_id]
+            previous_item = previous[key]
             if not previous_item["available"] and current_item["available"]:
-                events.append("BACK IN STOCK: " + current_item["title"])
+                events.append(describe("BACK IN STOCK", current_item))
 
     for event in events:
-        print(event)
-    print("Done.", len(events), "events.")
+        print(event.replace("\n", " | "))
+    print(f"Done. {len(events)} events.")
 
     if events:
-        should_save = send_telegram("\n".join(events))
+        should_save = send_events(events)
 
 if should_save:
     with open("state.json", "w") as f:
