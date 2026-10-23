@@ -12,59 +12,36 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 MIN_RATIO = 0.5
 MAX_PAGES = 20
-REQUEST_DELAY_SECONDS = 2
+REQUEST_DELAY_SECONDS = 1
 EVENTS_PER_MESSAGE = 10
 USER_AGENT = "TCGWatch/0.1 (+https://github.com/Duongtom/product-tracking-system) personal stock notifier"
 
-# Each source has a "type" that decides how we fetch it:
-#   "shopify"    -> the store's public /products.json (used by the TCG shops)
-#   "jbhifi_ucp" -> JB Hi-Fi's UCP catalogue search (it disables /products.json
-#                   per collection, so we use the agent API documented at
-#                   https://www.jbhifi.com.au/agents.md)
+# We only watch JB Hi-Fi. It runs on Shopify but disables per-collection
+# products.json, so we fetch through its UCP catalogue search (the agent API
+# documented at https://www.jbhifi.com.au/agents.md).
 SOURCES = [
-    {
-        "id": "trainertown",
-        "name": "Trainer Town",
-        "type": "shopify",
-        "base_url": "https://trainertown.com.au",
-        "collections": [],
-    },
-    {
-        "id": "pokebox",
-        "name": "Pokebox AU",
-        "type": "shopify",
-        "base_url": "https://www.pokebox.com.au",
-        "collections": [
-            "english-sealed-pokemon-trading-cards",
-            "japanese-pokemon-tcg-booster-boxes",
-        ],
-    },
-    {
-        "id": "onlinecoins",
-        "name": "Online Coins",
-        "type": "shopify",
-        "base_url": "https://www.onlinecoinsandcollectables.com.au",
-        "collections": ["pokemon-tcg"],
-    },
     {
         "id": "jbhifi",
         "name": "JB Hi-Fi",
-        "type": "jbhifi_ucp",
         "base_url": "https://www.jbhifi.com.au",
         "query": "pokemon",
     },
 ]
 
-# JB Hi-Fi runs on Shopify and exposes the Universal Commerce Protocol (UCP)
-# for agents. We call its catalogue-search tool over MCP (a JSON-RPC endpoint).
-# The "profile" just has to be a reachable URL that declares a UCP version;
-# the store's own public profile satisfies that with no extra hosting.
+# JB Hi-Fi exposes the Universal Commerce Protocol (UCP) for agents. We call its
+# catalogue-search tool over MCP (a JSON-RPC endpoint). The "profile" just has to
+# be a reachable URL that declares a UCP version; the store's own public profile
+# satisfies that with no extra hosting.
 JBHIFI_UCP_ENDPOINT = "https://www.jbhifi.com.au/api/ucp/mcp"
 JBHIFI_UCP_PROFILE = "https://www.jbhifi.com.au/.well-known/ucp"
 UCP_PAGE_SIZE = 250
 
-KEYWORDS = ["pokemon", "one piece", "op-17"]
-EXCLUDE_KEYWORDS = ["single", "sleeve", "playmat", "gaming mat", "binder", "deck box"]
+# The search already scopes results to Pokémon; we keep only titles that really
+# mention it (drops the odd unrelated item the search ranks at the tail).
+# "pokemon" also matches "Pokémon" because we strip accents before comparing.
+# EXCLUDE_KEYWORDS is empty on purpose: alert on every new Pokémon product.
+KEYWORDS = ["pokemon"]
+EXCLUDE_KEYWORDS = []
 
 
 def strip_accents(text):
@@ -85,37 +62,6 @@ def matches_keywords(title):
         if keyword in clean:
             return True
     return False
-
-
-def build_endpoints(source):
-    if not source["collections"]:
-        return [f"{source['base_url']}/products.json"]
-    endpoints = []
-    for handle in source["collections"]:
-        endpoints.append(f"{source['base_url']}/collections/{handle}/products.json")
-    return endpoints
-
-
-def fetch_shopify(source):
-    products = []
-    for endpoint in build_endpoints(source):
-        truncated = True
-        for page in range(1, MAX_PAGES + 1):
-            response = requests.get(
-                f"{endpoint}?limit=250&page={page}",
-                headers={"User-Agent": USER_AGENT},
-                timeout=20,
-            )
-            response.raise_for_status()
-            batch = response.json()["products"]
-            time.sleep(REQUEST_DELAY_SECONDS)
-            if not batch:
-                truncated = False
-                break
-            products.extend(batch)
-        if truncated:
-            print(f"WARNING: hit page limit on {endpoint}")
-    return products
 
 
 def ucp_read_result(response):
@@ -206,9 +152,7 @@ def fetch_jbhifi(source):
 
 
 def fetch_products(source):
-    if source.get("type") == "jbhifi_ucp":
-        return fetch_jbhifi(source)
-    return fetch_shopify(source)
+    return fetch_jbhifi(source)
 
 
 def load_previous():
