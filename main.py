@@ -16,16 +16,23 @@ REQUEST_DELAY_SECONDS = 2
 EVENTS_PER_MESSAGE = 10
 USER_AGENT = "TCGWatch/0.1 (+https://github.com/Duongtom/product-tracking-system) personal stock notifier"
 
+# Each source has a "type" that decides how we fetch it:
+#   "shopify"    -> the store's public /products.json (used by the TCG shops)
+#   "jbhifi_ucp" -> JB Hi-Fi's UCP catalogue search (it disables /products.json
+#                   per collection, so we use the agent API documented at
+#                   https://www.jbhifi.com.au/agents.md)
 SOURCES = [
     {
         "id": "trainertown",
         "name": "Trainer Town",
+        "type": "shopify",
         "base_url": "https://trainertown.com.au",
         "collections": [],
     },
     {
         "id": "pokebox",
         "name": "Pokebox AU",
+        "type": "shopify",
         "base_url": "https://www.pokebox.com.au",
         "collections": [
             "english-sealed-pokemon-trading-cards",
@@ -35,10 +42,26 @@ SOURCES = [
     {
         "id": "onlinecoins",
         "name": "Online Coins",
+        "type": "shopify",
         "base_url": "https://www.onlinecoinsandcollectables.com.au",
         "collections": ["pokemon-tcg"],
     },
+    {
+        "id": "jbhifi",
+        "name": "JB Hi-Fi",
+        "type": "jbhifi_ucp",
+        "base_url": "https://www.jbhifi.com.au",
+        "query": "pokemon",
+    },
 ]
+
+# JB Hi-Fi runs on Shopify and exposes the Universal Commerce Protocol (UCP)
+# for agents. We call its catalogue-search tool over MCP (a JSON-RPC endpoint).
+# The "profile" just has to be a reachable URL that declares a UCP version;
+# the store's own public profile satisfies that with no extra hosting.
+JBHIFI_UCP_ENDPOINT = "https://www.jbhifi.com.au/api/ucp/mcp"
+JBHIFI_UCP_PROFILE = "https://www.jbhifi.com.au/.well-known/ucp"
+UCP_PAGE_SIZE = 250
 
 KEYWORDS = ["pokemon", "one piece", "op-17"]
 EXCLUDE_KEYWORDS = ["single", "sleeve", "playmat", "gaming mat", "binder", "deck box"]
@@ -73,7 +96,7 @@ def build_endpoints(source):
     return endpoints
 
 
-def fetch_products(source):
+def fetch_shopify(source):
     products = []
     for endpoint in build_endpoints(source):
         truncated = True
@@ -93,6 +116,99 @@ def fetch_products(source):
         if truncated:
             print(f"WARNING: hit page limit on {endpoint}")
     return products
+
+
+def ucp_read_result(response):
+    # MCP may answer as plain JSON or as a text/event-stream; handle both.
+    text = response.text
+    if text.lstrip().startswith(("event:", "data:")):
+        for line in text.splitlines():
+            if line.startswith("data:"):
+                text = line[len("data:"):].strip()
+                break
+    envelope = json.loads(text)
+    if "error" in envelope:
+        raise RuntimeError(envelope["error"].get("message", "UCP error"))
+    # The tool result is itself a JSON string inside the MCP content.
+    return json.loads(envelope["result"]["content"][0]["text"])
+
+
+def ucp_search(query, cursor):
+    pagination = {"limit": UCP_PAGE_SIZE}
+    if cursor:
+        pagination["cursor"] = cursor
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "search_catalog",
+            "arguments": {
+                "meta": {"ucp-agent": {"profile": JBHIFI_UCP_PROFILE}},
+                "catalog": {
+                    "query": query,
+                    "pagination": pagination,
+                    "context": {"address_country": "AU", "currency": "AUD"},
+                },
+            },
+        },
+    }
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    # Respect the rate-limit guidance in JB Hi-Fi's agents.md: back off on 429.
+    for attempt in range(5):
+        response = requests.post(
+            JBHIFI_UCP_ENDPOINT, json=payload, headers=headers, timeout=30
+        )
+        if response.status_code == 429:
+            wait = response.headers.get("Retry-After")
+            time.sleep(int(wait) if wait and wait.isdigit() else 2 ** attempt)
+            continue
+        response.raise_for_status()
+        return ucp_read_result(response)
+    raise RuntimeError("rate limited by JB Hi-Fi after several retries")
+
+
+def fetch_jbhifi(source):
+    products = []
+    cursor = None
+    for page in range(1, MAX_PAGES + 1):
+        result = ucp_search(source["query"], cursor)
+        for product in result.get("products", []):
+            variants = product.get("variants")
+            if not variants:
+                continue
+            variant = variants[0]
+            cents = variant.get("price", {}).get("amount")
+            available = variant.get("availability", {}).get("available", False)
+            # Reshape into the same structure the Shopify products use, so the
+            # rest of the program treats every source the same way.
+            products.append({
+                "id": product["id"],
+                "title": product["title"],
+                "handle": product["handle"],
+                "variants": [{
+                    "price": "%.2f" % (cents / 100) if cents is not None else "0.00",
+                    "available": available,
+                }],
+            })
+        time.sleep(REQUEST_DELAY_SECONDS)
+        pagination = result.get("pagination", {})
+        cursor = pagination.get("cursor")
+        if not pagination.get("has_next_page") or not cursor:
+            break
+    else:
+        print(f"WARNING: hit page limit on {source['name']}")
+    return products
+
+
+def fetch_products(source):
+    if source.get("type") == "jbhifi_ucp":
+        return fetch_jbhifi(source)
+    return fetch_shopify(source)
 
 
 def load_previous():
