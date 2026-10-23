@@ -240,8 +240,17 @@ elif looks_broken(current, previous):
 elif not previous:
     print(f"First run - remembering {len(current)} products. No alerts.")
 else:
+    # Which sources did the saved state already know about? A product can only
+    # be "new" relative to a source we have seen before. When a source appears
+    # for the first time (e.g. we just switched the watch list over to JB Hi-Fi),
+    # we remember its products this run without firing an alert for each one,
+    # so adding a source never dumps hundreds of "NEW" messages at once.
+    previous_sources = {key.split(":", 1)[0] for key in previous}
     for key in current:
         current_item = current[key]
+        source_id = key.split(":", 1)[0]
+        if source_id not in previous_sources:
+            continue
         if key not in previous:
             events.append(describe("NEW", current_item))
         else:
