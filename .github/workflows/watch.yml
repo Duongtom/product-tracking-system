@@ -1,8 +1,10 @@
 name: Watch stores
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
+  # Scheduled monitoring is PAUSED. To resume automatic checks, uncomment the
+  # two lines below (runs every 5 minutes):
+  #   schedule:
+  #     - cron: "*/5 * * * *"
   workflow_dispatch:
 
 jobs:
